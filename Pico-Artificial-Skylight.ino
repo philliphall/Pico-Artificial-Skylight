@@ -98,7 +98,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define DEBUG_VERBOSE 4
 #define DEBUG_NEVER 9 // This is really only a placeholder. If you want to see this information, change the debug level on the specific line of code from NEVER to something else.
 
-#define DEBUG_LEVEL DEBUG_VERBOSE           // Set the debug level here
+#define DEBUG_LEVEL DEBUG_INFO           // Set the debug level here
 
 #define DEBUG_PRINT(level, message) \
     do { if (DEBUG_LEVEL >= level) Serial.print(message); } while (0)
