@@ -21,7 +21,7 @@
     - Dynamic brightness adjustment based on solar elevation
     - Manual and automatic control modes
     - OLED feedback for mode and brightness levels
-    - Flash storage management for storing settings
+    - EEPROM memory management for storing settings
     - Debugging support with adjustable verbosity
 
   Modes:
@@ -35,7 +35,7 @@
     - RTClib.h for RTC management
     - Adafruit_SSD1306.h for OLED display handling
     - Wire.h for I2C communication
-    - FlashStorage.h for non-volatile setting storage
+    - EEPROM.h for non-volatile memory storage
     - SolarCalculator.h for calculating solar position
 
   TO DO:
@@ -44,7 +44,7 @@
     - Split the code into multiple files for easier maintainability. 
 */
 
-#include <LittleFS.h>
+#include <EEPROM.h>
 #include <SolarCalculator.h>
 #include <RTClib.h>
 #include <Wire.h>
@@ -65,16 +65,18 @@ const float longitude = -84.54894616203148; // Hardcode your current location fo
 #define SKY_CHECK_INTERVAL 10000         // Used in mode 1&2 - only update skylight every xx milliseconds
 #define OLED_UPDATE_INTERVAL 500         // Milliseconds between OLED display updates
 #define BUTTON_DEBOUND_DELAY 50          // Debounce time in milliseconds
+#define USE_ONBOARD_LED                  // Whether or not to match the onboard LED to the PWM-controlled panel.
 
 // Enabled Modes -  Only uncomment the modes you want available (and that you have the hardware for!)
 #define MODE_POTENTIOMETER               // At this time, a potentiometer is still required for time setting (and I have yet to make compiliation without that functionality an option)
 #define MODE_SKYLIGHT1                   // A piecewise brightness curve that just seemed to match what I wanted. Results in softer daylight brightness.
 #define MODE_SKYLIGHT2                   // An advanced, mathematical, and closest to reality brightness. 
 //#define MODE_PHOTO_MATCH               // This mode leverages photosensors - one viewing the outside sky and another viewing the area under the LED panel and strives to make them match. This is the least tested and developed mode today. 
-//#define MODE_DEMO                      // A simple slow (but scaled) progression to test all valid PWM values - useful to finding the best MIN_ILLUM and DAYLIGHT values.
+#define MODE_DEMO                        // A simple slow (but scaled) progression to test all valid PWM values - useful to finding the best MIN_ILLUM and DAYLIGHT values.
 
 // Pin Designations
 #define LED_PIN16 14        // 16-bit PWM for LED control
+#define ONBOARD_LED 25      // Optionally, we can duplicate this brightness to the onboard LED. Only used if USE_ONBOARD_LED is also defined. 
 #define MODE_SW 16          // Mode switch button
 #define PHOTO_INT_PIN 28    // Internal photoresistor
 #define PHOTO_EXT_PIN 27    // External photoresistor
@@ -96,12 +98,17 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define DEBUG_VERBOSE 4
 #define DEBUG_NEVER 9 // This is really only a placeholder. If you want to see this information, change the debug level on the specific line of code from NEVER to something else.
 
-#define DEBUG_LEVEL DEBUG_WARNING        // Set the debug level here
+#define DEBUG_LEVEL DEBUG_VERBOSE           // Set the debug level here
 
 #define DEBUG_PRINT(level, message) \
     do { if (DEBUG_LEVEL >= level) Serial.print(message); } while (0)
 #define DEBUG_PRINTLN(level, message) \
     do { if (DEBUG_LEVEL >= level) Serial.println(message); } while (0)
+
+// EEPROM addresses
+#define ADDR_SIGNATURE 0                 // Address for signature
+#define ADDR_MODE 1                      // Address for the mode
+#define EEPROM_SIGNATURE 0xD4            // Signature byte
 
 // Global Scope Declarations
 unsigned long currentMillis = 0;         // stores the value of millis() in each iteration of loop()
@@ -111,7 +118,6 @@ uint8_t currentMode = 0;                 // 0-Manual, 1-Skylight1, 2-Skylight2, 
 uint16_t led_value16 = MIN_ILLUM16;      // 16-bit LED brightness control
 bool isDimmed = false;                   // Variable to track the current display brightness state
 bool isOff = false;                      // Variable to track the current display state
-FlashStorage(flashStore, uint8_t);       // Declare FlashStorage for storing the mode
 
 // Global variables for MODE_POTENTIOMETER
 #if defined(MODE_POTENTIOMETER)
@@ -169,6 +175,8 @@ unsigned long getNextDemoInterval(uint16_t led_value16, bool goingUp);
 #endif
 
 // Function Prototypes - Utility functions
+void initializeEEPROM();
+void writePWM(uint16_t led_value16);
 uint8_t gammaCorrection(uint8_t led_value, float gamma = 2.2); // No more 8-bit PWM any more, but still need this for 8-bit OLED display contrast correction
 uint16_t gammaCorrection16(uint16_t led_value16, float gamma = 2.2);
 
@@ -193,21 +201,32 @@ void displayTimeSetting(const DateTime &now);
 // *** SETUP ***
 void setup() {
   Serial.begin(115200);
+  // Wait for the serial port to connect, with a timeout to avoid getting stuck
+  if (DEBUG_LEVEL >= DEBUG_INFO) {
+    unsigned long startMillis = millis();
+    while (!Serial && (millis() - startMillis < 5000)) {
+      delay(10);
+    }
+  }
   Serial.println("Serial started");
   DEBUG_PRINTLN(DEBUG_INFO, "Setup started");
 
- // Initialize PWM for LED pins
+  // Initialize PWM for LED pins
   gpio_set_function(LED_PIN16, GPIO_FUNC_PWM);
-  pwm_set_wrap(pwm_gpio_to_slice_num(LED_PIN16), 65535);   // 16-bit resolution
-  pwm_set_gpio_level(LED_PIN16, 0); // Initial duty cycle (0%)
+  pwm_set_wrap(pwm_gpio_to_slice_num(LED_PIN16), 65535); // 16-bit resolution
   pwm_set_enabled(pwm_gpio_to_slice_num(LED_PIN16), true);
+  #ifdef USE_ONBOARD_LED
+  pinMode(ONBOARD_LED, OUTPUT);
+  #endif
+  writePWM(0); // Initial duty cycle (0%)
   
   // Mode switch setup
   pinMode(MODE_SW, INPUT_PULLUP);
   
   // Restore last mode
-  currentMode = flashStore.read();
-  DEBUG_PRINT(DEBUG_INFO, "Set initial Mode from flash storage: ");
+  initializeEEPROM();
+  currentMode = EEPROM.read(ADDR_MODE);
+  DEBUG_PRINT(DEBUG_INFO, "Setting initial Mode from EEPROM: ");
   DEBUG_PRINTLN(DEBUG_INFO, currentMode);
   
   // OLED Begin
@@ -223,14 +242,18 @@ void setup() {
 
   // Time Initialization
   if (!rtc.begin()) {
-    DEBUG_PRINTLN(DEBUG_ERROR, "Couldn't find RTC");
-    Serial.flush();
+    Serial.println("Couldn't find RTC, using compile time as default.");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set to compile time if RTC is not found
+  }
+  else if (rtc.lostPower()) {
+    Serial.println("RTC lost power, setting time to compile time.");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set to compile time if RTC lost power
   }
   DateTime now = rtc.now();
   if (now.year() < 2021 || now.year() > 2124) { // Check if the date seems reasonable
-    DEBUG_PRINTLN(DEBUG_ERROR, "RTC is running but the time is not set correctly");
+    DEBUG_PRINTLN(DEBUG_ERROR, "RTC is returning a value but the time is not set correctly");
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set to the compile time
-    enterDateTimeSettingMode();
+    //enterDateTimeSettingMode();
   }
   
   // Used in MODE_POTENTIOMETER
@@ -282,9 +305,9 @@ void loop() {
     currentMode = 0;                     // Dimmer moved - switch to manual dimming mode
     previousMillis = 0;                  // Always reset on mode change
     DEBUG_PRINTLN(DEBUG_WARNING, "Manual Override - Entering mode 0 - Manual Dimming");
-    flashStore.write(currentMode);       // Save new mode to flash whenever it changes
-    previousModePotval = potval;         // Reset  
-    lastInteractionMillis = currentMillis; // Reset interaction timer
+    EEPROM.update(ADDR_MODE, currentMode);  // Save new mode to EEPROM whenever it changes
+    previousModePotval = potval;            // Reset  
+    lastInteractionMillis = currentMillis;  // Reset interaction timer
   }
   #endif 
 
@@ -355,7 +378,7 @@ void handlePotentiometerMode(bool forceUpdate) {
   led_value16 = gammaCorrection16(mapped_value16);
 
   // Write the corrected values to the LED pins
-  pwm_set_gpio_level(LED_PIN16, led_value16);
+  writePWM(led_value16);
   updateDisplay("Manual Dimming", -1, led_value16, forceUpdate);
 
   // Update debug, based on timing
@@ -423,7 +446,7 @@ void handleSkylightMode1(bool forceUpdate) {
     if (led_value16 > DAYLIGHT_VALUE16) led_value16 = DAYLIGHT_VALUE16;
 
     // Write it
-    pwm_set_gpio_level(LED_PIN16, led_value16);
+    writePWM(led_value16);
     updateDisplay("Skylight Mode 1", elevation, led_value16, forceUpdate);
     DEBUG_PRINT(DEBUG_VERBOSE, "LED Value16: ");
     DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);
@@ -510,7 +533,7 @@ void handleSkylightMode2(bool forceUpdate) {
     if (led_value16 > DAYLIGHT_VALUE16) led_value16 = DAYLIGHT_VALUE16;
     
     // Write it
-    pwm_set_gpio_level(LED_PIN16, led_value16);
+    writePWM(led_value16);
     updateDisplay("Skylight Mode 2", elevation, led_value16, forceUpdate);
     DEBUG_PRINT(DEBUG_VERBOSE, "LED Value16: ");
     DEBUG_PRINTLN(DEBUG_VERBOSE, led_value16);
@@ -549,7 +572,7 @@ void handlePhotoresistorMatchMode(bool forceUpdate) {
     DEBUG_PRINT(DEBUG_ERROR, led_value16);
   }
   */    
-  pwm_set_gpio_level(LED_PIN16, led_value16);
+  writePWM(led_value16);
   updateDisplay("Brightness Match", -1, led_value16, forceUpdate);
 
   // Write status
@@ -595,7 +618,7 @@ void handleDemoMode(bool forceUpdate) {
   }
 
   // Update PWM outputs to LED
-  pwm_set_gpio_level(LED_PIN16, led_value16);
+  writePWM(led_value16);
   updateDisplay("Demo Mode", -1, led_value16, forceUpdate);
   #else
   cycleModes();
@@ -616,6 +639,26 @@ unsigned long getNextDemoInterval(uint16_t led_value16, bool goingUp) {
     else if (led_value16 > 40) return 40;
     else return 100;
   }
+  #endif
+  return -1; // Should not reach this
+}
+
+// Initialize EEPROM so we can retain last mode on resume
+void initializeEEPROM() {
+  uint8_t sig = EEPROM.read(ADDR_SIGNATURE);
+  if (sig != EEPROM_SIGNATURE) {
+    // Signature not matched, EEPROM not initialized
+    DEBUG_PRINTLN(DEBUG_WARNING, "EEPROM Signature not matched, initializing the EEPROM addresses used by this sketch.");
+    EEPROM.write(ADDR_SIGNATURE, EEPROM_SIGNATURE);
+    EEPROM.write(ADDR_MODE, 0);  // Default mode
+  }
+}
+
+// For writing LED_VALUE16 to the PWM pin, and optionally to the 8-bit onboard LED. 
+void writePWM(uint16_t led_value16) {
+  pwm_set_gpio_level(LED_PIN16, led_value16);
+  #ifdef USE_ONBOARD_LED
+  analogWrite(ONBOARD_LED, led_value16 >> 8);
   #endif
 }
 
@@ -703,7 +746,7 @@ void cycleModes() {
 
   // Cycle through modes
   currentMode = (currentMode + 1) % 5;
-  flashStore.write(currentMode);  // Save new mode to flash storage whenever it changes
+  EEPROM.update(ADDR_MODE, currentMode);  // Save new mode to EEPROM whenever it changes
   
   // Log mode entry
   DEBUG_PRINT(DEBUG_WARNING, "Switched to mode: ");
