@@ -26,6 +26,32 @@ The Original Arduino Artificial LED Skylight Controller ourgrew the Arduino Uno'
 - Suitable power supply (could potentially be pulled from the TV Panel)
 - Momentary pushbutton (if you want multiple modes without access to the Pico's built-in USR button)
 
+## Setup Instructions
+### 1. Installing Arduino IDE and Arduino-Pico Framework
+
+To use this project, you'll need to set up your development environment with the Arduino IDE and the Arduino-Pico core for RP2040. Follow these steps:
+
+1. Install [Arduino IDE](https://www.arduino.cc/en/software).
+2. Open Arduino IDE and navigate to **File > Preferences**.
+3. In the "Additional Boards Manager URLs" field, enter:  
+   `https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json`.
+4. Go to **Tools > Board > Boards Manager**, search for "Pico", and install Raspberry Pi Pico/RP2040 by Earle F. Philhower, III.
+5. Select your board, "Select Other Board", and pick Raspberry Pi Pico (The Raspberry Pi Pico/RP2040 version, **not** the Arduino-Mbed version).
+
+### 2. Selecting the Correct Settings
+
+Now that you are using the correct **Arduino-Pico** framework with this project, ensure you adjust the following settings in **Tools > Board** options:
+
+- **Board**: Double check that the previous step selected **Raspberry Pi Pico**.
+- **Flash Size**: Change this setting to match the flash on your RP2040 board including a small flash. Ensure **DO NOT** use `2MB (no flash)` as this disables flash storage and breaks setting persistence over power cycles.
+
+### 3. Uploading the Code
+
+Once you have selected the correct settings:
+1. Open the project in the Arduino IDE.
+2. Select the appropriate port under **Tools > Port**.
+3. Press **Upload** to flash the code onto your RP2040.
+
 ## Required Configuration
 ### 1. Setting Geographical Coordinates
 To simulate natural daylight, you need to set the latitude and longitude of your location in the code. These values are crucial for accurate solar elevation calculations.
@@ -47,19 +73,21 @@ The system allows you to configure the minimum illumination values for both 8-bi
   ```
 
 - **Calibrating Brightness**:
-  - **Run Demo Mode**: Use demo mode to cycle through all brightness levels. This will help identify the optimal minimum brightness (`MIN_ILLUM16`) for your LED panel. However, demo mode may run too quickly at higher brightness levels, so it might not be ideal for determining maximum brightness.
-  - **Manual Dimming Mode**: Switch to manual dimming mode and adjust the potentiometer to find a comfortable daylight brightness. Note the percentage shown on the OLED display, which can help you approximate and set the `DAYLIGHT_VALUE16` variables. This does no limit max manual dimming brightness, but does limit how bright your panel is at high noon. Mine seems brigher than the sun :-)
+  - **Option 1a - Use Demo Mode**: Use demo mode to cycle through all brightness levels. This will help identify the optimal minimum brightness (`MIN_ILLUM16`) for your LED panel. However, demo mode may run too quickly at higher brightness levels, so it might not be ideal for determining maximum brightness. 
+  - **Option 1b - Manual Dimming Mode**: Switch to manual dimming mode and adjust the potentiometer to find a comfortable daylight brightness. Note the percentage shown on the OLED display, which can help you approximate and set the `DAYLIGHT_VALUE16` variables. This does no limit max manual dimming brightness, but does limit how bright your panel is at high noon. Mine seems brigher than the sun :-)
+  - **Option 2 - Use Serial Commands**: While connected to Arduino IDE, with "newline" set as the line ending and baud rate set to 115200, you can send the serial commands (documented below) to configure these settings. 
 
 ### 3. Enabling/Disabling Modes
 Ensure that only the modes you intend to use are enabled. This can be controlled by commenting/uncommenting the mode definitions in the code:
 
 ```cpp
-// Enabled Modes -  Only uncomment the modes you want available (and that you have the hardware for!)
-#define MODE_POTENTIOMETER  // At this time, a potentiometer is still required for time setting (and I have yet to make compiliation without that functionality an option)
-#define MODE_SKYLIGHT1      // A piecewise brightness curve that just seemed to match what I wanted. Results in softer daylight brightness.
-#define MODE_SKYLIGHT2      // An advanced, mathematical, and closest to reality brightness. 
-//#define MODE_PHOTO_MATCH  // This mode leverages photosensors - one viewing the outside sky and another viewing the area under the LED panel and strives to make them match. This is the least tested and developed mode today. 
-//#define MODE_DEMO         // A simple slow (but scaled) progression to test all valid PWM values - useful to finding the best MIN_ILLUM and DAYLIGHT values.               
+// Enabled Modes -  Only uncomment the modes you want available (and that you have the hardware for!).
+#define EN_MODE_POTENTIOMETER            // At this time, a potentiometer is still required for time setting (and I have yet to make compiliation without that functionality an option)
+#define EN_MODE_SKYLIGHT1                // A piecewise brightness curve that just seemed to match what I wanted. Results in softer daylight brightness.
+#define EN_MODE_SKYLIGHT2                // An advanced, mathematical, and closest to reality brightness. 
+//#define EN_MODE_PHOTO_MATCH            // This mode leverages photosensors - one viewing the outside sky and another viewing the area under the LED panel and strives to make them match. This is the least tested and developed mode today. 
+#define EN_MODE_DEMO                     // A simple slow (but scaled) progression to test all valid PWM values - useful to finding the best min_illum and daylight_value.
+#define EN_MODE_SERIAL                   // Mode for Serial Control               
 ```
 
 **Reminder:** Properly configuring the enabled modes and ensuring the correct hardware is connected will prevent unexpected behavior and errors during operation.
@@ -96,8 +124,65 @@ Ensure that only the modes you intend to use are enabled. This can be controlled
 |                          | **GND**       | 18 (GND)       | Ground                                    |
 
 
+## Serial Commands
+
+This project supports various serial commands for adjusting settings on the fly. Commands must be sent with a newline character at the end (`\n`). Below are the available commands:
+
+### 1. Adjust PWM Frequency
+
+- **Command**: `F<value>`
+- **Description**: Sets the PWM frequency.
+- **Valid Values**: Any positive float value. The default value for the RP2040 is 488.28 Hz.
+- **Example**:  
+  `F500.00` sets the PWM frequency to 500 Hz.
+
+### 2. Adjust PWM Duty Cycle
+
+- **Command**: `D<value>`
+- **Description**: Sets the PWM duty cycle for the LED panel.
+- **Valid Values**: 0 to 65535 (16-bit PWM).
+- **Example**:  
+  `D32768` sets the PWM duty cycle to 50% (32768 out of 65535).
+
+### 3. Adjust Minimum Illumination (`minIllum`)
+
+- **Command**: `I<value>`
+- **Description**: Sets the minimum illumination level for the LED panel.
+- **Valid Values**: 0 to 65535.
+- **Example**:  
+  `I100` sets the minimum illumination to 100.
+
+### 4. Adjust Daylight Value (`daylight_value`)
+
+- **Command**: `L<value>`
+- **Description**: Sets the maximum daylight brightness for the LED panel.
+- **Valid Values**: 0 to 65535.
+- **Example**:  
+  `L60000` sets the daylight brightness value to 60000.
+
+### 5. Adjust Current Mode (`currentMode`)
+
+- **Command**: `M<value>`
+- **Description**: Sets the current mode.
+- **Valid Values**: 0 to 5.
+  - `0`: Manual Dimming
+  - `1`: Skylight Mode 1
+  - `2`: Skylight Mode 2
+  - `3`: Brightness Match (if enabled)
+  - `4`: Demo Mode
+  - `5`: Serial Control Mode
+- **Example**:  
+  `M2` sets the current mode to Skylight Mode 2.
+
+### 6. Print All Settings
+
+- **Command**: `P`
+- **Description**: Prints all current settings to the serial output, including PWM frequency, duty cycle, minimum illumination, daylight value, and the current mode.
+- **Example**:  
+  `P` prints all settings to the serial monitor.
+
+
 ## TO DO
-- **Fix EEPROM**: Emulation is not working on RP2040.
 - **Modularize by Hardware**: Enable the system to compile without certain hardware components like the display, potentiometer, button, or RTC module.
 - **Split the Code into Multiple Files**: Improve maintainability by separating the code into different files based on functionality.
 - **Improve Time Setting Mode**: I'd like more granularity in speed of increment, possibly by using modulo of delta section as a delay divisor.
